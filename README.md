@@ -156,3 +156,8 @@ Current state is a working foundation, not a general-purpose OS yet:
 2. Kernel handoff and runtime are alive and instrumented.
 3. Event-driven architecture is in active incremental milestones.
 4. Portability plan is oriented around HAL + Transjector normalization, keeping runtime semantics stable across platforms.
+
+## License
+
+This project is proprietary and distributed under the terms of `LICENSE`.
+Unauthorized use, copying, modification, and redistribution are prohibited.
