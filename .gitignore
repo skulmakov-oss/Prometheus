@@ -1,0 +1,20 @@
+# Rust build artifacts
+target/
+**/target/
+
+# Runtime artifacts
+dist/logs/
+dist/**/*.raw.log
+dist/**/*.json
+dist/ovmf/vars-runtime.fd
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Temp
+*.tmp
+*.bak
+dist/

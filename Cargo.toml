@@ -1,0 +1,20 @@
+[package]
+name = "vectoros-bootloader"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "vectoros-bootloader"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+uefi = { version = "0.28", features = ["alloc"] }
+uefi-services = "0.25"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
