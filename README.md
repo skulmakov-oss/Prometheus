@@ -1,4 +1,5 @@
 # VectorOS
+<img width="1536" height="1024" alt="ChatGPT Image 9 февр  2026 г , 16_29_39" src="https://github.com/user-attachments/assets/6b5e7107-6f94-40da-93df-cfb75bc4a79a" />
 
 VectorOS is a minimal OS project built in Rust (`no_std`) with a deterministic kernel runtime and a semantic event pipeline.
 
