@@ -1,4 +1,4 @@
-use uefi::table::boot::{AllocateType, BootServices, MemoryType};
+﻿use uefi::table::boot::{AllocateType, BootServices, MemoryType};
 
 const PT_LOAD: u32 = 1;
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
@@ -46,7 +46,17 @@ struct Elf64ProgramHeader {
     p_align: u64,
 }
 
+#[derive(Clone, Copy)]
+pub struct ElfLoadInfo {
+    pub entry: u64,
+    pub load_base: u64,
+}
+
 pub fn load_elf64(image: &[u8], bs: &BootServices) -> Result<u64, ElfLoadError> {
+    Ok(load_elf64_with_base(image, bs)?.entry)
+}
+
+pub fn load_elf64_with_base(image: &[u8], bs: &BootServices) -> Result<ElfLoadInfo, ElfLoadError> {
     let ehdr = parse_header(image)?;
     validate_header(&ehdr)?;
 
@@ -96,7 +106,10 @@ pub fn load_elf64(image: &[u8], bs: &BootServices) -> Result<u64, ElfLoadError> 
         load_segment(image, &ph)?;
     }
 
-    Ok(ehdr.e_entry)
+    Ok(ElfLoadInfo {
+        entry: ehdr.e_entry,
+        load_base: min_page,
+    })
 }
 
 fn parse_header(image: &[u8]) -> Result<Elf64Header, ElfLoadError> {
@@ -171,3 +184,5 @@ const fn align_down(value: u64, align: u64) -> u64 {
 const fn align_up(value: u64, align: u64) -> u64 {
     (value + align - 1) & !(align - 1)
 }
+
+

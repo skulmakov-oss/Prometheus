@@ -1,4 +1,4 @@
-use alloc::boxed::Box;
+﻿use alloc::boxed::Box;
 use uefi::proto::loaded_image::LoadedImage;
 use uefi::proto::media::file::{File, FileAttribute, FileInfo, FileMode, FileType, RegularFile};
 use uefi::proto::media::fs::SimpleFileSystem;
@@ -7,6 +7,18 @@ use uefi::table::{Boot, SystemTable};
 use uefi::{cstr16, Handle, Status};
 
 pub fn load_kernel_file(image: Handle, st: &mut SystemTable<Boot>) -> Result<&'static [u8], Status> {
+    load_file_by_path(image, st, cstr16!("\\EFI\\BOOT\\KERNEL.ELF"))
+}
+
+pub fn load_userland_file(image: Handle, st: &mut SystemTable<Boot>) -> Result<&'static [u8], Status> {
+    load_file_by_path(image, st, cstr16!("\\EFI\\BOOT\\HELLOSYS.ELF"))
+}
+
+fn load_file_by_path(
+    image: Handle,
+    st: &mut SystemTable<Boot>,
+    path: &uefi::CStr16,
+) -> Result<&'static [u8], Status> {
     let bs = st.boot_services();
     let loaded_image = bs
         .open_protocol_exclusive::<LoadedImage>(image)
@@ -17,19 +29,15 @@ pub fn load_kernel_file(image: Handle, st: &mut SystemTable<Boot>) -> Result<&'s
 
     let mut root = fs.open_volume().map_err(|err| err.status())?;
     let file = root
-        .open(
-            cstr16!("\\EFI\\BOOT\\KERNEL.ELF"),
-            FileMode::Read,
-            FileAttribute::empty(),
-        )
+        .open(path, FileMode::Read, FileAttribute::empty())
         .map_err(|err| err.status())?;
 
-    let mut kernel = match file.into_type().map_err(|err| err.status())? {
+    let mut regular = match file.into_type().map_err(|err| err.status())? {
         FileType::Regular(file) => file,
         _ => return Err(Status::LOAD_ERROR),
     };
 
-    let info = read_file_info(&mut kernel)?;
+    let info = read_file_info(&mut regular)?;
     let file_size = info.file_size() as usize;
 
     let ptr = bs
@@ -37,7 +45,7 @@ pub fn load_kernel_file(image: Handle, st: &mut SystemTable<Boot>) -> Result<&'s
         .map_err(|err| err.status())?;
 
     let buffer = unsafe { core::slice::from_raw_parts_mut(ptr, file_size) };
-    let read = kernel.read(buffer).map_err(|err| err.status())?;
+    let read = regular.read(buffer).map_err(|err| err.status())?;
     if read != file_size {
         return Err(Status::LOAD_ERROR);
     }
@@ -48,3 +56,4 @@ pub fn load_kernel_file(image: Handle, st: &mut SystemTable<Boot>) -> Result<&'s
 fn read_file_info(file: &mut RegularFile) -> Result<Box<FileInfo>, Status> {
     file.get_boxed_info::<FileInfo>().map_err(|err| err.status())
 }
+

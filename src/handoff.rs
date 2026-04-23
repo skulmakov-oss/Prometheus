@@ -1,9 +1,11 @@
-#[repr(C)]
+﻿#[repr(C)]
 pub struct BootInfo {
     pub magic: u64,
     pub framebuffer: Framebuffer,
     pub memory_map: MemoryMapInfo,
     pub rsdp_addr: u64,
+    pub user_entry: u64,
+    pub user_base: u64,
 }
 
 #[repr(C)]
@@ -27,3 +29,5 @@ pub struct MemoryMapInfo {
 
 pub const BOOT_MAGIC: u64 = 0x534F544345565F56;
 pub type KernelEntry = extern "sysv64" fn(*const BootInfo) -> !;
+
+

@@ -1,23 +1,44 @@
+#[cfg(any(
+    all(feature = "exc_ud", feature = "exc_gp"),
+    all(feature = "exc_ud", feature = "exc_pf"),
+    all(feature = "exc_ud", feature = "exc_df"),
+    all(feature = "exc_gp", feature = "exc_pf"),
+    all(feature = "exc_gp", feature = "exc_df"),
+    all(feature = "exc_pf", feature = "exc_df")
+))]
+compile_error!("Enable only one exception acceptance feature: exc_ud | exc_gp | exc_pf | exc_df");
 use crate::kernel_state::{
     CRIT_DISPATCH_BUDGET, CRIT_DISPATCH_MAX_SLOTS_PER_TICK, EventFrame, KernelState, TaskId,
-    TaskState, DL_LOG_MIN_PERIOD_TICKS, DL_LOG_THROTTLE_TICKS, DL_LOG_WINDOW_TICKS, DL_TABLE,
+    TaskState, UserTaskState, DL_LOG_MIN_PERIOD_TICKS, DL_LOG_THROTTLE_TICKS, DL_LOG_WINDOW_TICKS, DL_TABLE,
     EC_COUNT, EC_CRIT, EC_HIGH, EC_LOW, EC_NORM, EVT_ALL, EVT_BUS, EVT_FAB, EVT_LOG, EVT_SLOTS,
     EVT_TIMER, EVQ_CAP_CLASS, EVQ_DRAIN_BUDGET, EVQ_DRAIN_QUOTA, EVQ_STARVE_WARN_TICKS, RawEvent,
-    RAW_INTERNAL, RAW_SOFTIRQ, RAWC_INTERNAL_LOG_FLUSH, SLOT_BUS, SLOT_FAB,
-    SLOT_LOG, SLOT_TIMER, SRC_SOFTIRQ, SRC_TASK, SLEEP_NONE, TASK_DISPATCH_BUDGET,
+    SLOT_BUS, SLOT_FAB,
+    SLOT_LOG, SLOT_TIMER, SRC_SOFTIRQ, SLEEP_NONE, TASK_DISPATCH_BUDGET,
     TASK_DISPATCH_BUDGET_MAX, TASK_DISPATCH_BUDGET_MIN, TASK_DISPATCH_MAX_SLOTS_PER_TICK,
 };
 use crate::hal;
 use crate::log;
 use crate::softirq;
+use crate::syscall;
 use crate::transjector::{
-    bus_step_gated, make_softirq_raw, payload_get_chan, tx_init_defaults, tx_set_enabled, tx_step,
+    bus_step_gated, make_softirq_raw, payload_get_chan, tx_init_defaults, tx_step,
 };
 use crate::transvector::fabric_step;
 
+const USER_TASK_ID: TaskId = 3;
+const WORKER_TASK_ID: TaskId = 5;
+#[cfg(feature = "user_repeat")]
+const USER_REPEAT_DELAY_TICKS: u64 = 1024;
+
 pub fn run(state: &mut KernelState) -> ! {
     tx_init_defaults(state);
+    log::set_marker(0x5200);
     log::serial_only("R00 runtime start");
+    #[cfg(feature = "baseline")]
+    log::serial_only("B00 baseline mode enabled");
+    register_userland_task(state);
+    register_worker_task(state);
+    run_exception_acceptance_if_enabled();
     let _ = state.bootinfo.magic;
     let _ = &mut state.fb;
     let mut last_logged = 0u64;
@@ -36,10 +57,136 @@ pub fn run(state: &mut KernelState) -> ! {
     }
 }
 
+
+#[inline(always)]
+fn run_exception_acceptance_if_enabled() {
+    #[cfg(feature = "exc_ud")]
+    {
+        log::set_marker(0x58A1);
+        log::serial_only("XT0 exc_acceptance UD");
+        unsafe {
+            core::arch::asm!("ud2", options(noreturn));
+        }
+    }
+
+    #[cfg(feature = "exc_gp")]
+    {
+        log::set_marker(0x58A2);
+        log::serial_only("XT0 exc_acceptance GP");
+        unsafe {
+            core::arch::asm!("int 13", options(noreturn));
+        }
+    }
+
+    #[cfg(feature = "exc_pf")]
+    {
+        log::set_marker(0x58A3);
+        log::serial_only("XT0 exc_acceptance PF");
+        let addr = 0xFFFF_FFFF_FFFF_F000u64 as *const u64;
+        unsafe {
+            let _ = core::ptr::read_volatile(addr);
+        }
+    }
+
+    #[cfg(feature = "exc_df")]
+    {
+        log::set_marker(0x58A4);
+        log::serial_only("XT0 exc_acceptance DF");
+        crate::interrupts::trigger_df_acceptance();
+    }
+}
+
+fn register_userland_task(state: &mut KernelState) {
+    if state.user_task.entry == 0 {
+        return;
+    }
+
+    log::set_marker(0x5500);
+    let mut line = [0u8; 96];
+    let mut n = 0usize;
+    n += append_bytes(&mut line[n..], b"U00 userland task reg entry=");
+    n += append_hex_u64(&mut line[n..], state.user_task.entry);
+    n += append_bytes(&mut line[n..], b" b=");
+    n += append_u64(&mut line[n..], state.user_task.budget as u64);
+    if let Ok(s) = core::str::from_utf8(&line[..n]) {
+        log::serial_only(s);
+    }
+
+    state.user_task.state = UserTaskState::Ready;
+    if (USER_TASK_ID as usize) < state.tasks.len() {
+        state.tasks[USER_TASK_ID as usize] = TaskState::Ready;
+    }
+}
+
+fn register_worker_task(state: &mut KernelState) {
+    if (WORKER_TASK_ID as usize) >= state.tasks.len() {
+        return;
+    }
+    state.tasks[WORKER_TASK_ID as usize] = TaskState::Ready;
+    log::serial_only("W00 worker task reg tid=5");
+}
+
+fn userland_task(state: &mut KernelState) {
+    if state.user_task.state == UserTaskState::Exited {
+        return;
+    }
+
+    state.user_task.state = UserTaskState::Running;
+    state.user_runs = state.user_runs.wrapping_add(1);
+    state.last_run_tick[USER_TASK_ID as usize] = state.tick;
+    log::serial_only("U10 userland run");
+
+    let entry: extern "sysv64" fn() -> u64 = unsafe { core::mem::transmute(state.user_task.entry as usize) };
+    let ret = entry() as i64;
+
+    state.user_task.ret = ret;
+    state.user_task.state = UserTaskState::Exited;
+    task_set_state(state, USER_TASK_ID, TaskState::Blocked);
+
+    let mut line = [0u8; 64];
+    let mut n = 0usize;
+    n += append_bytes(&mut line[n..], b"U90 userland exit ret=");
+    if ret < 0 {
+        n += append_bytes(&mut line[n..], b"-");
+        n += append_u64(&mut line[n..], ret.unsigned_abs());
+    } else {
+        n += append_u64(&mut line[n..], ret as u64);
+    }
+    if let Ok(s) = core::str::from_utf8(&line[..n]) {
+        log::serial_only(s);
+    }
+}
+fn worker_task(state: &mut KernelState) {
+    state.worker_runs = state.worker_runs.wrapping_add(1);
+    state.last_run_tick[WORKER_TASK_ID as usize] = state.tick;
+    if (state.worker_runs & 0x3F) == 0 {
+        let mut line = [0u8; 64];
+        let mut n = 0usize;
+        n += append_bytes(&mut line[n..], b"W01 worker alive tick=");
+        n += append_u64(&mut line[n..], state.tick);
+        if let Ok(s) = core::str::from_utf8(&line[..n]) {
+            log::serial_only(s);
+        }
+    }
+}
+
 fn runtime_step(state: &mut KernelState) -> u64 {
+    #[cfg(feature = "user_repeat")]
+    {
+        if state.user_task.entry != 0
+            && state.user_task.state == UserTaskState::Exited
+            && state.tick >= state.user_next_ready_tick
+        {
+            state.user_task.state = UserTaskState::Ready;
+            task_set_state(state, USER_TASK_ID, TaskState::Ready);
+        }
+    }
+
+    log::set_marker(0x5201);
     let irq_tick = hal::time_now_tick();
     let dt = timer_contract_step(state, irq_tick);
 
+    log::set_marker(0x5202);
     let pending = softirq::take_pending();
     if pending != 0 {
         if (pending & softirq::SOFTIRQ_BUS) != 0 {
@@ -68,13 +215,20 @@ fn runtime_step(state: &mut KernelState) -> u64 {
         }
     }
 
+    syscall::process_ipc_budgeted();
+
+    log::set_marker(0x5203);
     event_router_step(state);
+    log::set_marker(0x5204);
     wakeup_step(state);
+    log::set_marker(0x5205);
     adaptive_budget_step(state);
 
+    log::set_marker(0x5206);
     scheduler_step(state);
     let cur = state.current_task as usize;
     if cur < state.task_count as usize && state.tasks[cur] == TaskState::Ready {
+        log::set_marker(0x5207);
         task_step(state.current_task, state);
     }
     dt
@@ -194,6 +348,8 @@ fn task_step(task_id: TaskId, state: &mut KernelState) {
         0 => log_task(state),
         1 => logic_task(state),
         2 => fabric_task(state),
+        3 => userland_task(state),
+        5 => worker_task(state),
         _ => {}
     }
 }
@@ -214,7 +370,15 @@ fn logic_task(state: &mut KernelState) {
         task_subscribe(state, 0, EVT_TIMER);
         task_subscribe(state, 2, EVT_BUS | EVT_FAB | EVT_LOG);
     }
+    stress_scenarios_step(state);
 
+    if (state.logic_counter & 0x1FF) == 0 {
+        log::serial_only("T01 logic alive");
+    }
+}
+
+#[cfg(not(feature = "baseline"))]
+fn stress_scenarios_step(state: &mut KernelState) {
     // S: CRIT bypass under LOG flood.
     if state.logic_counter == 220 {
         task_wait(state, 2, EVT_FAB);
@@ -222,9 +386,9 @@ fn logic_task(state: &mut KernelState) {
     if state.logic_counter == 240 {
         let mut i = 0u32;
         while i < 40 {
-            publish_event_ex(state, EVT_LOG, SRC_TASK, 3000 + i);
+            publish_event_ex(state, EVT_LOG, crate::kernel_state::SRC_TASK, 3000 + i);
             if i == 0 {
-                publish_event_ex(state, EVT_TIMER, SRC_TASK, 4000 + i);
+                publish_event_ex(state, EVT_TIMER, crate::kernel_state::SRC_TASK, 4000 + i);
             }
             i += 1;
         }
@@ -240,8 +404,8 @@ fn logic_task(state: &mut KernelState) {
     if state.logic_counter == 300 {
         let mut i = 0u32;
         while i < 24 {
-            publish_event_ex(state, EVT_BUS, SRC_TASK, 5000 + i);
-            publish_event_ex(state, EVT_LOG, SRC_TASK, 6000 + i);
+            publish_event_ex(state, EVT_BUS, crate::kernel_state::SRC_TASK, 5000 + i);
+            publish_event_ex(state, EVT_LOG, crate::kernel_state::SRC_TASK, 6000 + i);
             i += 1;
         }
     }
@@ -258,7 +422,7 @@ fn logic_task(state: &mut KernelState) {
         task_subscribe(state, 1, EVT_BUS);
     }
     if state.logic_counter == 342 {
-        publish_event_ex(state, EVT_BUS | EVT_LOG, SRC_TASK, 777);
+        publish_event_ex(state, EVT_BUS | EVT_LOG, crate::kernel_state::SRC_TASK, 777);
     }
     if state.logic_counter == 344 {
         task_unsubscribe(state, 1, EVT_BUS);
@@ -271,17 +435,17 @@ fn logic_task(state: &mut KernelState) {
     if state.logic_counter == 360 {
         let mut i = 0u32;
         while i < 10 {
-            publish_event_ex(state, EVT_BUS, SRC_TASK, 8000 + i);
+            publish_event_ex(state, EVT_BUS, crate::kernel_state::SRC_TASK, 8000 + i);
             i += 1;
         }
     }
 
     // Y: slot priority FAB over LOG under one budget.
     if state.logic_counter == 380 {
-        publish_event_ex(state, EVT_FAB, SRC_TASK, 8100);
+        publish_event_ex(state, EVT_FAB, crate::kernel_state::SRC_TASK, 8100);
         let mut i = 0u32;
         while i < 10 {
-            publish_event_ex(state, EVT_LOG, SRC_TASK, 8200 + i);
+            publish_event_ex(state, EVT_LOG, crate::kernel_state::SRC_TASK, 8200 + i);
             i += 1;
         }
     }
@@ -290,7 +454,7 @@ fn logic_task(state: &mut KernelState) {
     if state.logic_counter == 400 {
         let mut i = 0u16;
         while i < 300 {
-            mailbox_push(state, 2, EVT_BUS, SRC_TASK, 9000 + i as u32, state.tick as u32);
+            mailbox_push(state, 2, EVT_BUS, crate::kernel_state::SRC_TASK, 9000 + i as u32, state.tick as u32);
             i += 1;
         }
         task_signal(state, 2, EVT_BUS);
@@ -304,7 +468,7 @@ fn logic_task(state: &mut KernelState) {
     if state.logic_counter == 422 {
         let raw = RawEvent {
             src: SRC_SOFTIRQ,
-            kind: RAW_SOFTIRQ,
+            kind: crate::kernel_state::RAW_SOFTIRQ,
             code: 0x01FF,
             arg: 0,
         };
@@ -312,11 +476,11 @@ fn logic_task(state: &mut KernelState) {
     }
     // AA3: disable BUS transjector and ensure BUS raw is dropped.
     if state.logic_counter == 424 {
-        let _ = tx_set_enabled(state, 3, false);
+        let _ = crate::transjector::tx_set_enabled(state, 3, false);
         softirq::raise(softirq::SOFTIRQ_BUS);
     }
     if state.logic_counter == 426 {
-        let _ = tx_set_enabled(state, 3, true);
+        let _ = crate::transjector::tx_set_enabled(state, 3, true);
         softirq::raise(softirq::SOFTIRQ_BUS);
     }
     // AB1: BUS ports via MMIO RX/TX.
@@ -348,7 +512,7 @@ fn logic_task(state: &mut KernelState) {
             state,
             RawEvent {
                 src: SRC_SOFTIRQ,
-                kind: RAW_SOFTIRQ,
+                kind: crate::kernel_state::RAW_SOFTIRQ,
                 code: crate::kernel_state::RAWC_SOFTIRQ_FABRIC,
                 arg: 0,
             },
@@ -371,7 +535,7 @@ fn logic_task(state: &mut KernelState) {
             state,
             RawEvent {
                 src: SRC_SOFTIRQ,
-                kind: RAW_SOFTIRQ,
+                kind: crate::kernel_state::RAW_SOFTIRQ,
                 code: crate::kernel_state::RAWC_SOFTIRQ_LOG,
                 arg: 0,
             },
@@ -382,7 +546,7 @@ fn logic_task(state: &mut KernelState) {
             state,
             RawEvent {
                 src: SRC_SOFTIRQ,
-                kind: RAW_INTERNAL,
+                kind: crate::kernel_state::RAW_INTERNAL,
                 code: crate::kernel_state::RAWC_INTERNAL_PANIC,
                 arg: 0,
             },
@@ -393,8 +557,8 @@ fn logic_task(state: &mut KernelState) {
             state,
             RawEvent {
                 src: SRC_SOFTIRQ,
-                kind: RAW_INTERNAL,
-                code: RAWC_INTERNAL_LOG_FLUSH,
+                kind: crate::kernel_state::RAW_INTERNAL,
+                code: crate::kernel_state::RAWC_INTERNAL_LOG_FLUSH,
                 arg: 0,
             },
         );
@@ -403,11 +567,10 @@ fn logic_task(state: &mut KernelState) {
     if state.logic_counter == 4096 {
         task_sleep(state, 1, 200);
     }
-    if (state.logic_counter & 0x1FF) == 0 {
-        log::serial_only("T01 logic alive");
-    }
 }
 
+#[cfg(feature = "baseline")]
+fn stress_scenarios_step(_state: &mut KernelState) {}
 fn fabric_task(state: &mut KernelState) {
     let _ = task_dispatch_mail(state, 2, state.dispatch_budget[2]);
     let wake = task_take_wake(state, 2);
@@ -435,6 +598,7 @@ pub fn task_set_state(state: &mut KernelState, id: TaskId, new: TaskState) {
     log_task_state_change(id, new);
 }
 
+#[cfg_attr(feature = "baseline", allow(dead_code))]
 pub fn task_sleep(state: &mut KernelState, id: TaskId, ticks: u64) {
     if id >= state.task_count || ticks == 0 {
         return;
@@ -1190,6 +1354,7 @@ fn log_task_ovf_seen(id: TaskId, ovf_mask: u32) {
     }
 }
 
+#[cfg_attr(feature = "baseline", allow(dead_code))]
 fn log_sleep(id: TaskId, until: u64) {
     let mut line = [0u8; 64];
     let mut n = 0usize;
@@ -1557,3 +1722,54 @@ fn append_u64(dst: &mut [u8], mut value: u64) -> usize {
     }
     out
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+fn append_hex_u64(dst: &mut [u8], mut value: u64) -> usize {
+    if dst.is_empty() {
+        return 0;
+    }
+    if value == 0 {
+        dst[0] = b'0';
+        return 1;
+    }
+    let mut rev = [0u8; 16];
+    let mut n = 0usize;
+    while value > 0 && n < rev.len() {
+        let d = (value & 0xF) as u8;
+        rev[n] = if d < 10 { b'0' + d } else { b'a' + (d - 10) };
+        value >>= 4;
+        n += 1;
+    }
+    let out = core::cmp::min(n, dst.len());
+    let mut i = 0usize;
+    while i < out {
+        dst[i] = rev[n - 1 - i];
+        i += 1;
+    }
+    out
+}
+
+
+
+
+
+
+

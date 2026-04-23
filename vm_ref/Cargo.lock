@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "vectoros-vm-ref"
+name = "prometheus-vm-ref"
 version = "0.1.0"

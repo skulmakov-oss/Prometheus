@@ -24,6 +24,7 @@ pub const SRC_SOFTIRQ: u8 = 1;
 pub const SRC_TIMER: u8 = 2;
 #[allow(dead_code)]
 pub const SRC_DRIVER: u8 = 3;
+#[allow(dead_code)]
 pub const SRC_TASK: u8 = 4;
 #[allow(dead_code)]
 pub const SRC_HAL: u8 = 5;
@@ -71,6 +72,10 @@ pub const DL_TABLE: [u16; EVT_SLOTS] = [DL_TIMER, DL_BUS, DL_FAB, DL_LOG];
 pub const DL_LOG_THROTTLE_TICKS: u32 = 64;
 pub const DL_LOG_WINDOW_TICKS: u32 = 256;
 pub const DL_LOG_MIN_PERIOD_TICKS: u32 = 64;
+pub const IPC_RING_CAP: usize = 8;
+pub const IPC_DRAIN_BUDGET: u8 = 2;
+pub const IPC_KIND_PING: u32 = 1;
+pub const IPC_KIND_PONG: u32 = 2;
 
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub enum TaskState {
@@ -78,6 +83,37 @@ pub enum TaskState {
     Blocked,
 }
 
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub enum UserTaskState {
+    Ready,
+    Running,
+    Exited,
+}
+
+
+#[derive(Copy, Clone)]
+pub struct UserTask {
+    pub entry: u64,
+    pub state: UserTaskState,
+    pub ret: i64,
+    pub budget: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct IpcMsg {
+    pub kind: u32,
+    pub arg0: u64,
+    pub arg1: u64,
+}
+
+impl IpcMsg {
+    pub const EMPTY: Self = Self {
+        kind: 0,
+        arg0: 0,
+        arg1: 0,
+    };
+}
 #[derive(Copy, Clone)]
 pub struct EventFrame {
     pub evt_mask: u32,
@@ -158,4 +194,21 @@ pub struct KernelState {
     pub woke: u64,
     pub logic_counter: u64,
     pub task2_counter: u64,
+    pub worker_runs: u64,
+    pub user_runs: u64,
+    pub last_run_tick: [u64; MAX_TASKS],
+    pub user_next_ready_tick: u64,
+    pub user_task: UserTask,
 }
+
+
+
+
+
+
+
+
+
+
+
+

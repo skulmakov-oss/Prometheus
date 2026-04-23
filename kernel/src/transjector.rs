@@ -1,4 +1,4 @@
-use crate::quad::QuadReg;
+﻿use crate::quad::QuadReg;
 use crate::kernel_state::{
     KernelState, RawEvent, VectorEvent, TxIngestFn, EVT_BUS, EVT_FAB, EVT_LOG, EVT_TIMER, MAX_TX,
     RAW_INTERNAL, RAW_IRQ, RAW_MMIO, RAW_SOFTIRQ, RAWC_INTERNAL_LOG_FLUSH, RAWC_INTERNAL_PANIC,
@@ -269,6 +269,7 @@ pub fn tx_register(
     true
 }
 
+#[cfg_attr(feature = "baseline", allow(dead_code))]
 pub fn tx_set_enabled(state: &mut KernelState, tid: u8, enabled: bool) -> bool {
     let mut i = 0usize;
     while i < state.tx_count as usize {
@@ -495,3 +496,4 @@ fn append_u642(dst: &mut [u8], mut value: u64) -> usize {
     }
     out
 }
+
