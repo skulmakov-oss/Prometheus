@@ -1,7 +1,7 @@
-# VectorOS
+# Prometheus
 <img width="1536" height="1024" alt="ChatGPT Image 9 февр  2026 г , 16_29_39" src="https://github.com/user-attachments/assets/6b5e7107-6f94-40da-93df-cfb75bc4a79a" />
 
-VectorOS is a minimal OS project built in Rust (`no_std`) with a deterministic kernel runtime and a semantic event pipeline.
+Prometheus is a minimal OS project built in Rust (`no_std`) with a deterministic kernel runtime and a semantic event pipeline.
 
 Current focus:
 1. Reliable boot path (UEFI bootloader -> ELF kernel handoff).
@@ -10,7 +10,7 @@ Current focus:
 
 ## Architecture Principles
 
-VectorOS is built around this stack:
+Prometheus is built around this stack:
 1. `HAL`: minimal hardware-facing primitives (timer/irq/serial/framebuffer).
 2. `Transjector Layer`: normalize raw platform signals into stable semantic events.
 3. `Deterministic Runtime`: route, filter, dispatch, and account events with bounded behavior.
@@ -34,7 +34,7 @@ Design constraints:
 Bootloader expected screen log:
 
 ```text
-VectorOS Bootloader
+Prometheus Bootloader
 GOP OK
 Disk OK
 Kernel loaded

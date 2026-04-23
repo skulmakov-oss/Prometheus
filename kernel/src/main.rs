@@ -1,4 +1,4 @@
-#![no_std]
+﻿#![no_std]
 #![no_main]
 
 mod demo;
@@ -11,6 +11,7 @@ mod log;
 mod quad;
 mod runtime;
 mod serial;
+mod syscall;
 mod softirq;
 mod transjector;
 mod transvector;
@@ -18,8 +19,8 @@ mod transvector;
 use core::panic::PanicInfo;
 use framebuffer::{Framebuffer, FramebufferWriter};
 use kernel_state::{
-    KernelState, TaskState, EC_COUNT, EVENT_FRAME_EMPTY, EVT_SLOTS, EVQ_CAP_CLASS, MAX_TASKS,
-    MAX_TX, SLEEP_NONE, SRC_NONE,
+    KernelState, TaskState, UserTask, UserTaskState, EC_COUNT, EVENT_FRAME_EMPTY, EVT_SLOTS,
+    EVQ_CAP_CLASS, MAX_TASKS, MAX_TX, SLEEP_NONE, SRC_NONE,
 };
 
 #[repr(C)]
@@ -28,6 +29,8 @@ pub struct BootInfo {
     pub framebuffer: Framebuffer,
     pub memory_map: MemoryMapInfo,
     pub rsdp_addr: u64,
+    pub user_entry: u64,
+    pub user_base: u64,
 }
 
 #[repr(C)]
@@ -41,12 +44,49 @@ const BOOT_MAGIC: u64 = 0x534F544345565F56;
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    halt()
+    let lm = log::last_marker() as u64;
+    log::set_marker(0x5000);
+
+    let rip = read_rip();
+    let rsp = read_rsp();
+
+    let _ = log::serial_try("P00 panic");
+
+    let mut line = [0u8; 128];
+    let mut n = 0usize;
+    n += append_bytes(&mut line[n..], b"P01 lm=");
+    n += append_hex_u64(&mut line[n..], lm);
+    n += append_bytes(&mut line[n..], b" rip=");
+    n += append_hex_u64(&mut line[n..], rip);
+    n += append_bytes(&mut line[n..], b" rsp=");
+    n += append_hex_u64(&mut line[n..], rsp);
+    if let Ok(s) = core::str::from_utf8(&line[..n]) {
+        let _ = log::serial_try(s);
+    }
+
+    interrupts::halt_forever()
+}
+
+fn read_rip() -> u64 {
+    let value: u64;
+    unsafe {
+        core::arch::asm!("lea {}, [rip]", out(reg) value, options(nomem, nostack, preserves_flags));
+    }
+    value
+}
+
+fn read_rsp() -> u64 {
+    let value: u64;
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) value, options(nomem, nostack, preserves_flags));
+    }
+    value
 }
 
 #[no_mangle]
 pub extern "sysv64" fn kernel_main(info: *const BootInfo) -> ! {
     serial::init();
+    log::set_marker(0x4B00);
     log::serial_only("K00 kernel entry");
 
     if info.is_null() {
@@ -78,6 +118,7 @@ pub extern "sysv64" fn kernel_main(info: *const BootInfo) -> ! {
         log::serial_only("E06 fb bounds");
         halt();
     }
+    log::set_marker(0x4B01);
     log::serial_only("K01 bootinfo ok");
 
     paint_screen(bootinfo.framebuffer, 0x00103070);
@@ -86,9 +127,10 @@ pub extern "sysv64" fn kernel_main(info: *const BootInfo) -> ! {
     fb.clear();
     log::both(&mut fb, "K00 kernel entry");
     log::both(&mut fb, "K01 bootinfo ok");
+    log::set_marker(0x4B02);
     log::serial_only("K02 framebuffer writer");
 
-    fb.write_line("VectorOS Kernel v0");
+    fb.write_line("Prometheus Kernel v0");
 
     let mut line1 = [0u8; 64];
     let mut n1 = 0usize;
@@ -99,6 +141,7 @@ pub extern "sysv64" fn kernel_main(info: *const BootInfo) -> ! {
     if let Ok(s) = core::str::from_utf8(&line1[..n1]) {
         fb.write_line(s);
     }
+    log::set_marker(0x4B03);
     log::serial_only("K03 framebuffer info");
 
     let entries = if bootinfo.memory_map.desc_size == 0 {
@@ -114,10 +157,13 @@ pub extern "sysv64" fn kernel_main(info: *const BootInfo) -> ! {
     if let Ok(s) = core::str::from_utf8(&line2[..n2]) {
         fb.write_line(s);
     }
+    log::set_marker(0x4B04);
     log::serial_only("K04 memory map info");
 
     demo::run(&mut fb);
+    log::set_marker(0x4B05);
     interrupts::init();
+    syscall::init();
 
     let mut state = KernelState {
         bootinfo,
@@ -127,14 +173,14 @@ pub extern "sysv64" fn kernel_main(info: *const BootInfo) -> ! {
         missed: 0,
         max_dt: 0,
         current_task: 0,
-        task_count: 3,
+        task_count: 6,
         tasks: [
             TaskState::Ready,
             TaskState::Ready,
             TaskState::Blocked,
+            if bootinfo.user_entry != 0 { TaskState::Ready } else { TaskState::Blocked },
             TaskState::Blocked,
-            TaskState::Blocked,
-            TaskState::Blocked,
+            TaskState::Ready,
             TaskState::Blocked,
             TaskState::Blocked,
         ],
@@ -176,7 +222,18 @@ pub extern "sysv64" fn kernel_main(info: *const BootInfo) -> ! {
         woke: 0,
         logic_counter: 0,
         task2_counter: 0,
+        worker_runs: 0,
+        user_runs: 0,
+        last_run_tick: [0; MAX_TASKS],
+        user_next_ready_tick: 0,
+        user_task: UserTask {
+            entry: bootinfo.user_entry,
+            state: if bootinfo.user_entry != 0 { UserTaskState::Ready } else { UserTaskState::Exited },
+            ret: 0,
+            budget: 8,
+        },
     };
+    log::set_marker(0x4B06);
     runtime::run(&mut state)
 }
 
@@ -211,6 +268,31 @@ fn append_u64(dst: &mut [u8], mut value: u64) -> usize {
     out
 }
 
+fn append_hex_u64(dst: &mut [u8], mut value: u64) -> usize {
+    if dst.is_empty() {
+        return 0;
+    }
+
+    if value == 0 {
+        dst[0] = b'0';
+        return 1;
+    }
+
+    let mut rev = [0u8; 16];
+    let mut n = 0usize;
+    while value > 0 && n < rev.len() {
+        let d = (value & 0xF) as u8;
+        rev[n] = if d < 10 { b'0' + d } else { b'a' + (d - 10) };
+        value >>= 4;
+        n += 1;
+    }
+
+    let out = core::cmp::min(n, dst.len());
+    for i in 0..out {
+        dst[i] = rev[n - 1 - i];
+    }
+    out
+}
 fn halt() -> ! {
     loop {
         core::hint::spin_loop();
@@ -255,3 +337,18 @@ fn paint_screen(fb: Framebuffer, rgb: u32) {
         y += 1;
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

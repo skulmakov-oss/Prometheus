@@ -1,10 +1,10 @@
 [package]
-name = "vectoros-bootloader"
+name = "prometheus-bootloader"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "vectoros-bootloader"
+name = "prometheus-bootloader"
 path = "src/main.rs"
 test = false
 bench = false

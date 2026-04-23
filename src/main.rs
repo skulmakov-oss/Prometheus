@@ -1,4 +1,4 @@
-#![no_std]
+﻿#![no_std]
 #![no_main]
 
 extern crate alloc;
@@ -31,7 +31,7 @@ fn efi_main(image: Handle, mut st: SystemTable<Boot>) -> Status {
         return Status::ABORTED;
     }
 
-    log_line(&mut st, "VectorOS Bootloader");
+    log_line(&mut st, "Prometheus Bootloader");
 
     let framebuffer = match gop::init(&mut st) {
         Ok(fb) => {
@@ -66,6 +66,25 @@ fn efi_main(image: Handle, mut st: SystemTable<Boot>) -> Status {
         }
     };
 
+    let user_image = match fs::load_userland_file(image, &mut st) {
+        Ok(file) => file,
+        Err(status) => {
+            log_status(&mut st, "Userland Disk ERR", status);
+            return status;
+        }
+    };
+
+    let (user_entry, user_base) = match elf::load_elf64_with_base(user_image, st.boot_services()) {
+        Ok(info) => {
+            log_line(&mut st, "Userland loaded");
+            (info.entry, info.load_base)
+        }
+        Err(_) => {
+            log_status(&mut st, "Userland ERR", Status::LOAD_ERROR);
+            return Status::LOAD_ERROR;
+        }
+    };
+
     let rsdp_addr = st
         .config_table()
         .iter()
@@ -94,6 +113,8 @@ fn efi_main(image: Handle, mut st: SystemTable<Boot>) -> Status {
             desc_size,
         },
         rsdp_addr,
+        user_entry,
+        user_base,
     };
 
     let boot_info_ptr = memory::store_boot_info(boot_info);
@@ -101,3 +122,5 @@ fn efi_main(image: Handle, mut st: SystemTable<Boot>) -> Status {
     let entry: KernelEntry = unsafe { core::mem::transmute(entry_addr as usize) };
     entry(boot_info_ptr)
 }
+
+

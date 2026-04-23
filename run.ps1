@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 function Fail([string]$msg) {
@@ -17,26 +17,44 @@ function Resolve-ExistingPath([string[]]$candidates) {
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
-Write-Host "[1/5] Build bootloader (release)"
+Write-Host "[1/6] Build bootloader (release)"
 cargo build --release
 if ($LASTEXITCODE -ne 0) { Fail "bootloader build failed" }
 
-Write-Host "[2/5] Build kernel (release)"
+Write-Host "[2/6] Build kernel (release)"
+$kernelFeatures = ""
+if (-not [string]::IsNullOrWhiteSpace($env:PROMETHEUS_KERNEL_FEATURES)) {
+    $kernelFeatures = $env:PROMETHEUS_KERNEL_FEATURES.Trim()
+}
 Push-Location ".\kernel"
-cargo build --release
+if ([string]::IsNullOrWhiteSpace($kernelFeatures)) {
+    cargo build --release
+} else {
+    Write-Host "Kernel features: $kernelFeatures"
+    cargo build --release --features $kernelFeatures
+}
 if ($LASTEXITCODE -ne 0) { Pop-Location; Fail "kernel build failed" }
 Pop-Location
 
-$efiSrc = Join-Path $root "target\x86_64-unknown-uefi\release\vectoros-bootloader.efi"
-$elfSrc = Join-Path $root "kernel\target\x86_64-unknown-none\release\vectoros-kernel"
+Write-Host "[3/6] Build userland hello-sys (release)"
+Push-Location ".\userland\hello-sys"
+cargo build --release
+if ($LASTEXITCODE -ne 0) { Pop-Location; Fail "userland build failed" }
+Pop-Location
+
+$efiSrc = Join-Path $root "target\x86_64-unknown-uefi\release\prometheus-bootloader.efi"
+$elfSrc = Join-Path $root "kernel\target\x86_64-unknown-none\release\prometheus-kernel"
+$userElfSrc = Join-Path $root "userland\hello-sys\target\x86_64-unknown-none\release\prometheus-hello-sys"
 if (!(Test-Path $efiSrc)) { Fail "missing bootloader EFI: $efiSrc" }
 if (!(Test-Path $elfSrc)) { Fail "missing kernel ELF: $elfSrc" }
+if (!(Test-Path $userElfSrc)) { Fail "missing userland ELF: $userElfSrc" }
 
-Write-Host "[3/5] Prepare ESP folder"
+Write-Host "[4/6] Prepare ESP folder"
 $bootDir = Join-Path $root "dist\esp\EFI\BOOT"
 New-Item -ItemType Directory -Force $bootDir | Out-Null
 Copy-Item $efiSrc (Join-Path $bootDir "BOOTX64.EFI") -Force
 Copy-Item $elfSrc (Join-Path $bootDir "KERNEL.ELF") -Force
+Copy-Item $userElfSrc (Join-Path $bootDir "HELLOSYS.ELF") -Force
 
 $qemu = $null
 if (-not [string]::IsNullOrWhiteSpace($env:QEMU_EXE)) {
@@ -121,7 +139,7 @@ $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $rawLogPath = Join-Path $logDir ("run-" + $stamp + ".raw.log")
 $jsonLogPath = Join-Path $logDir ("run-" + $stamp + ".json")
 $latestJsonPath = Join-Path $logDir "latest.json"
-Write-Host "[4/5] Launch QEMU"
+Write-Host "[5/6] Launch QEMU"
 Write-Host "QEMU: $qemu"
 Write-Host "OVMF_CODE: $ovmfCode"
 Write-Host "OVMF_VARS: $varsRuntime"
@@ -139,19 +157,43 @@ $qemuOutput = & $qemu `
 $exitCode = $LASTEXITCODE
 $lines = @($qemuOutput | ForEach-Object { $_.ToString() })
 
+$runId = "run-" + $stamp
+$runTimestamp = (Get-Date).ToString("o")
+
 $logObject = [PSCustomObject]@{
-    timestamp = (Get-Date).ToString("o")
+    run_id = $runId
+    stamp = $stamp
+    timestamp = $runTimestamp
     qemu = $qemu
     ovmf_code = $ovmfCode
     ovmf_vars = $varsRuntime
     esp = $espDirQemu
+    raw_log = $rawLogPath
+    run_json = $jsonLogPath
     exit_code = $exitCode
     lines = $lines
 }
-$logObject | ConvertTo-Json -Depth 5 | Set-Content $jsonLogPath
-Copy-Item $jsonLogPath $latestJsonPath -Force
+$jsonTmpPath = $jsonLogPath + ".tmp"
+$logObject | ConvertTo-Json -Depth 5 | Set-Content -Path $jsonTmpPath -Encoding UTF8
+Move-Item -Path $jsonTmpPath -Destination $jsonLogPath -Force
 
-Write-Host "[5/5] QEMU exit code: $exitCode"
+$latestObject = [PSCustomObject]@{
+    updated_at = $runTimestamp
+    run_id = $runId
+    stamp = $stamp
+    raw_log = $rawLogPath
+    run_json = $jsonLogPath
+    exit_code = $exitCode
+    qemu = $qemu
+    ovmf_code = $ovmfCode
+    ovmf_vars = $varsRuntime
+    esp = $espDirQemu
+}
+$latestTmpPath = $latestJsonPath + ".tmp"
+$latestObject | ConvertTo-Json -Depth 5 | Set-Content -Path $latestTmpPath -Encoding UTF8
+Move-Item -Path $latestTmpPath -Destination $latestJsonPath -Force
+
+Write-Host "[6/6] QEMU exit code: $exitCode"
 Write-Host "Last log lines:"
 $tail = @(
     $lines |
@@ -165,3 +207,6 @@ if ($tail.Count -eq 0) {
     $tail | ForEach-Object { Write-Host $_ }
 }
 exit $exitCode
+
+
+
