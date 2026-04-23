@@ -20,8 +20,10 @@ use crate::hal;
 use crate::log;
 use crate::softirq;
 use crate::syscall;
+use crate::quad::QuadReg;
 use crate::transjector::{
-    bus_step_gated, make_softirq_raw, payload_get_chan, tx_init_defaults, tx_step,
+    bus_push, bus_step_gated, make_softirq_raw, payload_get_chan, transject, tx_init_defaults,
+    tx_step, TransjectorEvent,
 };
 use crate::transvector::fabric_step;
 
@@ -209,9 +211,6 @@ fn runtime_step(state: &mut KernelState) -> u64 {
         }
         if (pending & softirq::SOFTIRQ_FABRIC) != 0 {
             let _ = fabric_step();
-        }
-        if (pending & softirq::SOFTIRQ_LOG) != 0 {
-            let _ = state.tick;
         }
     }
 
@@ -1436,6 +1435,11 @@ fn tx_publish_raw(state: &mut KernelState, raw: RawEvent) {
     if let Some((tid, out)) = tx_step(state, raw) {
         publish_event_ex(state, out.evt_mask, out.src_id, out.payload);
         log_tx_out(tid, out.evt_mask, out.src_id, out.payload);
+        // Feed lane system: transjector fired → True state on its output vector.
+        // Lane index mirrors the transjector slot (tid 1-4 → lanes 0-3).
+        let lane = tid.saturating_sub(1) & 3;
+        let t = transject(tid as u64, lane, QuadReg::T.bits() as u64);
+        let _ = bus_push(lane, TransjectorEvent { out_id: tid as u64, t });
     }
 }
 

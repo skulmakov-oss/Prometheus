@@ -104,15 +104,6 @@ pub fn bus_push(lane: u8, ev: TransjectorEvent) -> bool {
     }
 }
 
-#[allow(dead_code)]
-pub fn bus_step() -> Option<TransjectorEvent> {
-    if let Some((_, ev)) = pop_next_event_rr() {
-        let _ = apply(ev.out_id, ev.t);
-        return Some(ev);
-    }
-    None
-}
-
 pub fn bus_step_gated() -> StepResult {
     let Some((lane, ev)) = pop_next_event_rr() else {
         write_trace(0, 0, 0, 0, 0, 2);
@@ -228,7 +219,6 @@ pub fn pack_payload(ptype: u8, chan: u8, id: u8, sev: u8, flags: u8) -> u32 {
         | (((flags & 0x0F) as u32) << 28)
 }
 
-#[allow(dead_code)]
 pub fn payload_set_chan(payload: u32, chan: u8) -> u32 {
     (payload & !(0xFFu32 << 8)) | ((chan as u32) << 8)
 }
@@ -454,26 +444,26 @@ fn tx_ingest_log(_state: &mut KernelState, raw: RawEvent) -> Option<VectorEvent>
 fn log_tx_reg(tid: u8, slot: u8, interest: u32, rawk: u32) {
     let mut line = [0u8; 80];
     let mut n = 0usize;
-    n += append_bytes2(&mut line[n..], b"T10 tx_reg tid=");
-    n += append_u642(&mut line[n..], tid as u64);
-    n += append_bytes2(&mut line[n..], b" slot=");
-    n += append_u642(&mut line[n..], slot as u64);
-    n += append_bytes2(&mut line[n..], b" im=");
-    n += append_u642(&mut line[n..], interest as u64);
-    n += append_bytes2(&mut line[n..], b" rk=");
-    n += append_u642(&mut line[n..], rawk as u64);
+    n += append_bytes(&mut line[n..], b"T10 tx_reg tid=");
+    n += append_u64(&mut line[n..], tid as u64);
+    n += append_bytes(&mut line[n..], b" slot=");
+    n += append_u64(&mut line[n..], slot as u64);
+    n += append_bytes(&mut line[n..], b" im=");
+    n += append_u64(&mut line[n..], interest as u64);
+    n += append_bytes(&mut line[n..], b" rk=");
+    n += append_u64(&mut line[n..], rawk as u64);
     if let Ok(s) = core::str::from_utf8(&line[..n]) {
         log::serial_only(s);
     }
 }
 
-fn append_bytes2(dst: &mut [u8], src: &[u8]) -> usize {
+fn append_bytes(dst: &mut [u8], src: &[u8]) -> usize {
     let count = core::cmp::min(dst.len(), src.len());
     dst[..count].copy_from_slice(&src[..count]);
     count
 }
 
-fn append_u642(dst: &mut [u8], mut value: u64) -> usize {
+fn append_u64(dst: &mut [u8], mut value: u64) -> usize {
     if dst.is_empty() {
         return 0;
     }
